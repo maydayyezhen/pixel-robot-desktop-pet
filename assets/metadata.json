@@ -1,0 +1,26 @@
+{
+  "source": "",
+  "robot_source_cutout": "assets/robot-source-cutout.png",
+  "robot_master_refined": "assets/robot-master-refined.png",
+  "robot": "assets/robot.png",
+  "master_screen_bbox": [
+    119,
+    174,
+    355,
+    328
+  ],
+  "master_size": [
+    552,
+    550
+  ],
+  "screen_bbox": [
+    41,
+    60,
+    123,
+    113
+  ],
+  "robot_size": [
+    191,
+    190
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "pet_height": 160,
+  "sound_enabled": true,
+  "music_clicks_enabled": true,
+  "show_track_info": true,
+  "playing_hint": true,
+  "alarms": []
+}
