@@ -250,6 +250,7 @@ class RobotPet:
         self.sound_var = tk.BooleanVar(value=self.sound_enabled)
         self.music_clicks_var = tk.BooleanVar(value=self.music_clicks_enabled)
         self.track_info_var = tk.BooleanVar(value=self.show_track_info)
+        self.topmost_var = tk.BooleanVar(value=self.always_on_top)
         self.startup_var = tk.BooleanVar(value=self.startup_enabled())
 
         self.menu = Menu(self.root, tearoff=False)
@@ -295,7 +296,7 @@ class RobotPet:
             )
         self.menu.add_cascade(label="大小", menu=self.size_menu)
         self.menu.add_checkbutton(label="音效", variable=self.sound_var, command=self.toggle_sound)
-        self.menu.add_command(label="置顶开关", command=self.toggle_topmost)
+        self.menu.add_checkbutton(label="置顶开关", variable=self.topmost_var, command=self.toggle_topmost)
         self.menu.add_checkbutton(label="开机自启动", variable=self.startup_var, command=self.toggle_startup)
         self.menu.add_separator()
         self.menu.add_command(label="退出", command=self.root.destroy)
@@ -1286,7 +1287,7 @@ class RobotPet:
         self.update_cursor()
 
     def toggle_topmost(self) -> None:
-        self.always_on_top = not self.always_on_top
+        self.always_on_top = bool(self.topmost_var.get())
         self.root.attributes("-topmost", self.always_on_top)
         self.play_sound("toggle")
 
