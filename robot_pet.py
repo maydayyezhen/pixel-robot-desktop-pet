@@ -11,6 +11,7 @@ import sys
 import asyncio
 import threading
 import uuid
+import zlib
 from io import BytesIO
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -219,6 +220,9 @@ class RobotPet:
         )
         self.photo: ImageTk.PhotoImage | None = None
         self.track_photo: ImageTk.PhotoImage | None = None
+        self.track_text_item: int | None = None
+        self.track_text_key: tuple[object, ...] | None = None
+        self.frame_photo_cache: dict[tuple[object, ...], ImageTk.PhotoImage] = {}
         self.particles: list[Particle] = []
         self.dragging = False
         self.drag_start_root = (0, 0)
@@ -234,8 +238,11 @@ class RobotPet:
         self.media_indicator = ""
         self.media_indicator_until = 0.0
         self.hover_media_action = ""
+        self.current_cursor = ""
         self.album_cover_wait_until = 0.0
+        self.album_cover_key: tuple[int, int] | None = None
         self.next_track_poll_at = 0.0
+        self.last_particle_tick_at = time.monotonic()
         self.media_poll_thread: threading.Thread | None = None
         self.media_poll_lock = threading.Lock()
         self.pending_media_snapshot: MediaSnapshot | None = None
@@ -476,6 +483,10 @@ class RobotPet:
         self.canvas.config(width=self.window_width, height=self.window_height)
         self.root.geometry(f"{self.window_width}x{self.window_height}+{current_x}+{current_y}")
         self.canvas.coords(self.image_id, *self.pet_center())
+        self.canvas.delete("track_text")
+        self.canvas.delete("equalizer")
+        self.track_text_item = None
+        self.track_text_key = None
         self.save_settings()
         self.refresh_music_info()
         self.play_sound("toggle")
@@ -837,9 +848,13 @@ class RobotPet:
             self.album_title = snapshot.album_title
         old_cover = self.album_cover_image
         if snapshot.cover_bytes is not None:
-            self.album_cover_image = self.prepare_album_cover(snapshot.cover_bytes)
+            cover_key = (len(snapshot.cover_bytes), zlib.crc32(snapshot.cover_bytes))
+            if cover_key != self.album_cover_key:
+                self.album_cover_image = self.prepare_album_cover(snapshot.cover_bytes)
+                self.album_cover_key = cover_key if self.album_cover_image is not None else None
         elif changed:
             self.album_cover_image = None
+            self.album_cover_key = None
         cover_ready = self.album_cover_image is not None
         cover_just_arrived = old_cover is None and cover_ready
         if snapshot.is_playing is not None:
@@ -969,12 +984,16 @@ class RobotPet:
             cursor = "hand2"
         else:
             cursor = "hand2"
-        self.canvas.config(cursor=cursor)
+        if cursor != self.current_cursor:
+            self.canvas.config(cursor=cursor)
+            self.current_cursor = cursor
 
     def clear_cursor(self, _event: tk.Event | None = None) -> None:
         if not self.dragging:
             self.hover_media_action = ""
-            self.canvas.config(cursor="")
+            if self.current_cursor:
+                self.canvas.config(cursor="")
+                self.current_cursor = ""
 
     def scaled_robot(self, height: int) -> tuple[Image.Image, tuple[int, int, int, int]]:
         scale = height / self.master_base.height
@@ -1249,6 +1268,8 @@ class RobotPet:
         self.canvas.config(width=self.window_width, height=self.window_height)
         self.root.geometry(f"{self.window_width}x{self.window_height}+{new_x}+{new_y}")
         self.canvas.coords(self.image_id, *self.pet_center())
+        self.frame_photo_cache.clear()
+        self.track_text_key = None
         self.particles.clear()
         self.save_settings()
         self.spawn_sparks(self.window_width / 2, self.window_height / 2, count=8)
@@ -1576,53 +1597,57 @@ class RobotPet:
         return hard_alpha(image, threshold=96)
 
     def draw_track_text(self) -> None:
-        self.canvas.delete("track")
+        self.canvas.delete("equalizer")
+        title = artist = album = ""
+        title_size, artist_size = self.track_font_sizes()
+        album_size = self.album_font_size()
         if self.alarm_ringing:
-            title_size, artist_size = self.track_font_sizes()
-            album_size = self.album_font_size()
             max_text_width = min(self.max_track_text_width(), max(80, self.window_width - 32))
             title = self.fit_text_to_width("闹钟时间到", title_size, max_text_width)
             label = self.alarm_display_label() or "点击关闭"
             artist = self.fit_text_to_width(label, artist_size, max_text_width)
             album = self.fit_text_to_width("点击关闭 · 右键稍后提醒", album_size, max_text_width)
+        elif self.show_track_info and self.track_title:
+            max_text_width = min(self.max_track_text_width(), max(80, self.window_width - 32))
+            title = self.fit_text_to_width(self.track_title, title_size, max_text_width)
+            artist = self.fit_text_to_width(self.track_artist, artist_size, max_text_width)
+            album = self.fit_text_to_width(self.album_popup_text(), album_size, max_text_width) if self.album_popup_active() else ""
+        else:
+            self.canvas.delete("track_text")
+            self.track_text_item = None
+            self.track_text_key = None
+            return
+
+        key = (title, artist, album, title_size, artist_size, album_size, self.pet_height)
+        if key != self.track_text_key or self.track_photo is None:
             text_image = self.render_track_text_image(title, artist, album, title_size, artist_size, album_size)
             self.track_photo = ImageTk.PhotoImage(text_image)
-            center_x, center_y = self.pet_center()
-            robot_top = center_y - self.base.height // 2
-            text_top = max(0, robot_top - max(6, round(self.pet_height * 0.05)) - text_image.height)
-            self.canvas.create_image(
+            self.track_text_key = key
+
+        center_x, center_y = self.pet_center()
+        robot_top = center_y - self.base.height // 2
+        if self.alarm_ringing:
+            text_top = max(0, robot_top - max(6, round(self.pet_height * 0.05)) - self.track_photo.height())
+        else:
+            equalizer_height = self.equalizer_height(title_size)
+            equalizer_base_y = robot_top - max(5, round(self.pet_height * 0.035))
+            text_gap = max(4, round(self.pet_height * 0.03))
+            text_top = max(0, equalizer_base_y - equalizer_height - text_gap - self.track_photo.height())
+
+        if self.track_text_item is None:
+            self.track_text_item = self.canvas.create_image(
                 center_x,
                 text_top,
                 anchor="n",
                 image=self.track_photo,
-                tags="track",
+                tags="track_text",
             )
-            return
+        else:
+            self.canvas.itemconfig(self.track_text_item, image=self.track_photo)
+            self.canvas.coords(self.track_text_item, center_x, text_top)
 
-        if not self.show_track_info or not self.track_title:
-            return
-        title_size, artist_size = self.track_font_sizes()
-        album_size = self.album_font_size()
-        max_text_width = min(self.max_track_text_width(), max(80, self.window_width - 32))
-        title = self.fit_text_to_width(self.track_title, title_size, max_text_width)
-        artist = self.fit_text_to_width(self.track_artist, artist_size, max_text_width)
-        album = self.fit_text_to_width(self.album_popup_text(), album_size, max_text_width) if self.album_popup_active() else ""
-        text_image = self.render_track_text_image(title, artist, album, title_size, artist_size, album_size)
-        self.track_photo = ImageTk.PhotoImage(text_image)
-        center_x, center_y = self.pet_center()
-        robot_top = center_y - self.base.height // 2
-        equalizer_height = self.equalizer_height(title_size)
-        equalizer_base_y = robot_top - max(5, round(self.pet_height * 0.035))
-        text_gap = max(4, round(self.pet_height * 0.03))
-        text_top = max(0, equalizer_base_y - equalizer_height - text_gap - text_image.height)
-        self.canvas.create_image(
-            center_x,
-            text_top,
-            anchor="n",
-            image=self.track_photo,
-            tags="track",
-        )
-        self.draw_playing_equalizer(center_x, equalizer_base_y, title_size)
+        if not self.alarm_ringing:
+            self.draw_playing_equalizer(center_x, equalizer_base_y, title_size)
 
     def draw_playing_equalizer(self, center_x: int, base_y: int, title_size: int) -> None:
         if not self.playing_hint:
@@ -1646,7 +1671,7 @@ class RobotPet:
                 base_y + scale,
                 fill="#152126",
                 outline="",
-                tags="track",
+                tags="equalizer",
             )
             self.canvas.create_rectangle(
                 left,
@@ -1655,7 +1680,7 @@ class RobotPet:
                 base_y,
                 fill="#4fe8d8",
                 outline="",
-                tags="track",
+                tags="equalizer",
             )
 
     def cycle_frame(self, now: float, frames: list[FrameSpec], fps: float) -> FrameSpec:
@@ -1690,10 +1715,44 @@ class RobotPet:
             frame = frame.rotate(spec.rotate, resample=Image.Resampling.NEAREST, expand=True)
         return frame, spec.bob
 
-    def make_frame(self, now: float) -> tuple[Image.Image, int]:
-        expr = self.expression(now)
+    def frame_cache_key(self, expr: str, spec: FrameSpec, now: float) -> tuple[object, ...] | None:
+        if self.alarm_ringing:
+            return None
+        if self.album_popup_active(now) and self.album_cover_image is not None and not self.sleeping and not self.dragging:
+            return None
+        active_indicator = self.media_indicator if self.media_indicator and now < self.media_indicator_until and not self.sleeping else ""
+        hover_action = self.hover_media_action if self.hover_media_action and not self.sleeping else ""
+        return (
+            self.pet_height,
+            expr,
+            spec,
+            active_indicator,
+            hover_action,
+            self.playing_hint if hover_action == "play_pause" else None,
+        )
+
+    def make_frame(self, now: float, expr: str | None = None, spec: FrameSpec | None = None) -> tuple[Image.Image, int]:
+        expr = expr or self.expression(now)
+        spec = spec or self.animation_frame_spec(now)
         image = self.draw_expression(self.base, expr, now)
-        return self.transform_frame(image, self.animation_frame_spec(now))
+        return self.transform_frame(image, spec)
+
+    def render_frame_photo(self, now: float) -> tuple[ImageTk.PhotoImage, int]:
+        expr = self.expression(now)
+        spec = self.animation_frame_spec(now)
+        key = self.frame_cache_key(expr, spec, now)
+        if key is not None:
+            cached = self.frame_photo_cache.get(key)
+            if cached is not None:
+                return cached, spec.bob
+
+        frame, bob = self.make_frame(now, expr, spec)
+        photo = ImageTk.PhotoImage(frame)
+        if key is not None:
+            if len(self.frame_photo_cache) > 96:
+                self.frame_photo_cache.clear()
+            self.frame_photo_cache[key] = photo
+        return photo, bob
 
     def alarm_shake_x(self, now: float) -> int:
         if not self.alarm_ringing:
@@ -1703,13 +1762,14 @@ class RobotPet:
     def tick_particles(self, dt: float) -> None:
         self.canvas.delete("particle")
         alive: list[Particle] = []
+        step = max(0.5, min(3.0, dt * 33.0))
         for particle in self.particles:
             particle.life -= dt
             if particle.life <= 0:
                 continue
-            particle.x += particle.vx
-            particle.y += particle.vy
-            particle.vy += 0.12
+            particle.x += particle.vx * step
+            particle.y += particle.vy * step
+            particle.vy += 0.12 * step
             alive.append(particle)
             self.canvas.create_rectangle(
                 particle.x,
@@ -1722,6 +1782,21 @@ class RobotPet:
             )
         self.particles = alive[-80:]
 
+    def next_update_delay_ms(self, now: float) -> int:
+        if self.alarm_ringing or self.dragging:
+            return 30
+        if self.particles or now < self.click_until or now < self.drop_until:
+            return 33
+        if now < self.media_indicator_until or self.hover_media_action:
+            return 50
+        if self.album_popup_active(now):
+            return 60
+        if self.show_track_info and self.track_title and self.playing_hint:
+            return 80
+        if self.sleeping:
+            return 180
+        return 110
+
     def update(self) -> None:
         now = time.monotonic()
         self.tick_alarm(now)
@@ -1729,14 +1804,15 @@ class RobotPet:
         if now >= self.next_track_poll_at:
             self.start_media_poll()
             self.next_track_poll_at = now + 1.0
-        frame, bob = self.make_frame(now)
-        self.photo = ImageTk.PhotoImage(frame)
+        self.photo, bob = self.render_frame_photo(now)
         self.canvas.itemconfig(self.image_id, image=self.photo)
         center_x, center_y = self.pet_center()
         self.canvas.coords(self.image_id, center_x + self.alarm_shake_x(now), center_y + bob)
-        self.tick_particles(1 / 33)
+        particle_dt = min(0.12, max(0.001, now - self.last_particle_tick_at))
+        self.last_particle_tick_at = now
+        self.tick_particles(particle_dt)
         self.draw_track_text()
-        self.root.after(30, self.update)
+        self.root.after(self.next_update_delay_ms(now), self.update)
 
     def run(self) -> None:
         self.update()
