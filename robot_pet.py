@@ -6,6 +6,7 @@ import random
 import time
 import tkinter as tk
 import ctypes
+from ctypes import wintypes
 import os
 import sys
 import asyncio
@@ -47,6 +48,7 @@ VK_MEDIA_PREV_TRACK = 0xB1
 VK_MEDIA_PLAY_PAUSE = 0xB3
 KEYEVENTF_KEYUP = 0x0002
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 MAX_PATH = 260
 TRACK_FONT_PATH = Path(r"C:\Windows\Fonts\msgothic.ttc")
 CHINESE_TRACK_FONT_PATH = Path(r"C:\Windows\Fonts\msyh.ttc")
@@ -171,6 +173,7 @@ class RobotPet:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Pixel Robot Pet")
+        self.set_low_process_priority()
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-transparentcolor", TRANSPARENT_COLOR)
@@ -725,6 +728,16 @@ class RobotPet:
             return ""
         finally:
             kernel32.CloseHandle(handle)
+
+    def set_low_process_priority(self) -> None:
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.SetPriorityClass.restype = wintypes.BOOL
+            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS)
+        except Exception:
+            pass
 
     def foreground_process_name(self) -> str:
         try:
