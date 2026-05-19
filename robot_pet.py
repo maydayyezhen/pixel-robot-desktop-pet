@@ -41,6 +41,7 @@ SIZE_OPTIONS = [
     ("中 190px", 190),
     ("大 230px", 230),
 ]
+GAME_PROCESS_NAMES = {"hearthstone.exe"}
 VK_MEDIA_NEXT_TRACK = 0xB0
 VK_MEDIA_PREV_TRACK = 0xB1
 VK_MEDIA_PLAY_PAUSE = 0xB3
@@ -185,6 +186,7 @@ class RobotPet:
         self.music_clicks_enabled = self.load_music_clicks_enabled(default=True)
         self.show_track_info = self.load_show_track_info(default=True)
         self.playing_hint = self.load_playing_hint(default=True)
+        self.game_mode_enabled = self.load_game_mode_enabled(default=True)
         self.alarms = self.load_alarms()
         self.ringing_alarm: AlarmItem | None = None
         self.track_title = ""
@@ -242,6 +244,9 @@ class RobotPet:
         self.album_cover_wait_until = 0.0
         self.album_cover_key: tuple[int, int] | None = None
         self.next_track_poll_at = 0.0
+        self.next_foreground_check_at = 0.0
+        self.foreground_game_active = False
+        self.window_hidden_for_game = False
         self.last_particle_tick_at = time.monotonic()
         self.media_poll_thread: threading.Thread | None = None
         self.media_poll_lock = threading.Lock()
@@ -251,6 +256,7 @@ class RobotPet:
         self.music_clicks_var = tk.BooleanVar(value=self.music_clicks_enabled)
         self.track_info_var = tk.BooleanVar(value=self.show_track_info)
         self.topmost_var = tk.BooleanVar(value=self.always_on_top)
+        self.game_mode_var = tk.BooleanVar(value=self.game_mode_enabled)
         self.startup_var = tk.BooleanVar(value=self.startup_enabled())
 
         self.menu = Menu(self.root, tearoff=False)
@@ -297,6 +303,7 @@ class RobotPet:
         self.menu.add_cascade(label="大小", menu=self.size_menu)
         self.menu.add_checkbutton(label="音效", variable=self.sound_var, command=self.toggle_sound)
         self.menu.add_checkbutton(label="置顶开关", variable=self.topmost_var, command=self.toggle_topmost)
+        self.menu.add_checkbutton(label="游戏性能模式", variable=self.game_mode_var, command=self.toggle_game_mode)
         self.menu.add_checkbutton(label="开机自启动", variable=self.startup_var, command=self.toggle_startup)
         self.menu.add_separator()
         self.menu.add_command(label="退出", command=self.root.destroy)
@@ -356,6 +363,15 @@ class RobotPet:
         except (OSError, TypeError, json.JSONDecodeError):
             return default
 
+    def load_game_mode_enabled(self, default: bool) -> bool:
+        if not SETTINGS.exists():
+            return default
+        try:
+            data = json.loads(SETTINGS.read_text(encoding="utf-8"))
+            return bool(data.get("game_mode_enabled", default))
+        except (OSError, TypeError, json.JSONDecodeError):
+            return default
+
     def load_alarms(self) -> list[AlarmItem]:
         if not SETTINGS.exists():
             return []
@@ -397,6 +413,7 @@ class RobotPet:
                     "music_clicks_enabled": self.music_clicks_enabled,
                     "show_track_info": self.show_track_info,
                     "playing_hint": self.playing_hint,
+                    "game_mode_enabled": self.game_mode_enabled,
                     "alarms": [
                         {"id": alarm.id, "at": alarm.at, "label": alarm.label}
                         for alarm in sorted(self.alarms, key=lambda item: item.at)
@@ -708,6 +725,38 @@ class RobotPet:
             return ""
         finally:
             kernel32.CloseHandle(handle)
+
+    def foreground_process_name(self) -> str:
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return ""
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            path = self.process_path_for_pid(pid.value)
+            return Path(path).name.lower() if path else ""
+        except Exception:
+            return ""
+
+    def refresh_foreground_game_state(self, now: float) -> None:
+        if now < self.next_foreground_check_at:
+            return
+        self.next_foreground_check_at = now + 0.75
+        self.foreground_game_active = self.foreground_process_name() in GAME_PROCESS_NAMES
+
+    def apply_game_window_state(self) -> None:
+        should_hide = self.game_mode_enabled and self.foreground_game_active and not self.alarm_ringing
+        if should_hide == self.window_hidden_for_game:
+            return
+        self.window_hidden_for_game = should_hide
+        if should_hide:
+            self.root.attributes("-topmost", False)
+            self.root.withdraw()
+            return
+
+        self.root.deiconify()
+        self.root.attributes("-topmost", self.always_on_top)
 
     def qqmusic_window_title(self) -> str:
         user32 = ctypes.windll.user32
@@ -1288,6 +1337,16 @@ class RobotPet:
 
     def toggle_topmost(self) -> None:
         self.always_on_top = bool(self.topmost_var.get())
+        if not self.window_hidden_for_game:
+            self.root.attributes("-topmost", self.always_on_top)
+        self.play_sound("toggle")
+
+    def toggle_game_mode(self) -> None:
+        self.game_mode_enabled = bool(self.game_mode_var.get())
+        self.save_settings()
+        self.foreground_game_active = False
+        self.window_hidden_for_game = False
+        self.root.deiconify()
         self.root.attributes("-topmost", self.always_on_top)
         self.play_sound("toggle")
 
@@ -1784,6 +1843,8 @@ class RobotPet:
         self.particles = alive[-80:]
 
     def next_update_delay_ms(self, now: float) -> int:
+        if self.window_hidden_for_game:
+            return 1000
         if self.alarm_ringing or self.dragging:
             return 30
         if self.particles or now < self.click_until or now < self.drop_until:
@@ -1800,7 +1861,13 @@ class RobotPet:
 
     def update(self) -> None:
         now = time.monotonic()
+        self.refresh_foreground_game_state(now)
         self.tick_alarm(now)
+        self.apply_game_window_state()
+        if self.window_hidden_for_game:
+            self.root.after(self.next_update_delay_ms(now), self.update)
+            return
+
         self.apply_pending_media_snapshot()
         if now >= self.next_track_poll_at:
             self.start_media_poll()

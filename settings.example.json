@@ -4,5 +4,6 @@
   "music_clicks_enabled": true,
   "show_track_info": true,
   "playing_hint": true,
+  "game_mode_enabled": true,
   "alarms": []
 }
